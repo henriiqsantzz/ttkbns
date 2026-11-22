@@ -1,10 +1,10 @@
 /* ===================================================================
    TTKPay — Modal Universal de Checkout PIX para Páginas UP
-   Integração com:
-   - /api/generate_qr_gateway (Smoke Pay)
-   - /api/payment-status?tx=...
+   Gateway: FlevoPay (via rotas backend do Vercel)
+   - POST /api/generate_qr_gateway
+   - GET  /api/payment-status?transactionId=...
    - QRCode.js (/checkout/qrcode.min.js)
-   - sessionStorage lead_data / cache PIX
+   - sessionStorage lead_data / cache PIX FlevoPay
    =================================================================== */
 (function() {
   'use strict';
@@ -468,7 +468,7 @@
     document.getElementById('ttkPriceModal').textContent = 'R$ ' + valor.toFixed(2).replace('.', ',');
 
     // Cache por oferta/página
-    var cacheKey = 'pix_cache_' + (window.location.pathname.replace(/\//g, '_') || 'up');
+    var cacheKey = 'pix_cache_flevopay_' + (window.location.pathname.replace(/\//g, '_') || 'up');
     var saved = sessionStorage.getItem(cacheKey);
     if (saved) {
       try {
@@ -515,6 +515,7 @@
       var expiresAt = Date.now() + (10 * 60 * 1000);
 
       sessionStorage.setItem(cacheKey, JSON.stringify({
+        provider: 'flevopay',
         payment_code: paymentCode,
         pix_code: pixCode,
         expires_at: expiresAt,
