@@ -388,59 +388,184 @@ body.modal-open{overflow:hidden;position:fixed;width:100%}
     document.getElementById(id).addEventListener('focus',function(){this.classList.remove('error');});
   });
 
+  // Recupera dados de identificação que já tenham sido fornecidos pelo comprador
+  // em uma etapa anterior. O checkout atual continua exibindo apenas nome e e-mail.
+  function readStoredLeadPix(storage) {
+    try {
+      var value = JSON.parse(storage.getItem('lead_data') || '{}');
+      return value && typeof value === 'object' ? value : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function firstLeadValue(objects, keys) {
+    for (var i = 0; i < objects.length; i++) {
+      for (var j = 0; j < keys.length; j++) {
+        var value = objects[i] && objects[i][keys[j]];
+        if (value !== undefined && value !== null && String(value).trim() !== '') {
+          return String(value).trim();
+        }
+      }
+    }
+    return '';
+  }
+
+  function getBuyerExtraData() {
+    var sessionLead = readStoredLeadPix(sessionStorage);
+    var localLead = readStoredLeadPix(localStorage);
+    var sources = [sessionLead, localLead];
+
+    var documentValue = firstLeadValue(sources, [
+      'document', 'documento', 'cpf', 'cnpj', 'cpf_cnpj'
+    ]);
+    var phoneValue = firstLeadValue(sources, [
+      'phone', 'telefone', 'celular', 'whatsapp'
+    ]);
+
+    // Também aceita dados que já venham na URL, sem criar dados fictícios.
+    documentValue = documentValue || params.get('cpf') || params.get('document') || params.get('cnpj') || '';
+    phoneValue = phoneValue || params.get('phone') || params.get('telefone') || params.get('celular') || '';
+
+    return {
+      document: String(documentValue).replace(/\D/g, ''),
+      phone: String(phoneValue).replace(/\D/g, ''),
+      sessionLead: sessionLead,
+      localLead: localLead
+    };
+  }
+
   document.getElementById('btnPagar').addEventListener('click',function(){
-    var nomeEl=document.getElementById('inputNome');
-    var emailEl=document.getElementById('inputEmail');
-    var ok=true;
-    [nomeEl,emailEl].forEach(function(el){el.classList.remove('error');});
-    var nomePartes=nomeEl.value.trim().split(' ').filter(function(p){return p.length>0;});
-    if(nomePartes.length<2){nomeEl.classList.add('error');ok=false;}
-    if(!validarEmail(emailEl.value.trim())){emailEl.classList.add('error');ok=false;}
-    if(!ok){
-      showToast('👆 Preencha todos os campos corretamente');
-      var first=document.querySelector('.field input.error');
-      if(first) first.scrollIntoView({behavior:'smooth',block:'center'});
+    var nomeEl = document.getElementById('inputNome');
+    var emailEl = document.getElementById('inputEmail');
+    var nomeCompleto = nomeEl.value.trim();
+    var email = emailEl.value.trim();
+    var ok = true;
+
+    [nomeEl, emailEl].forEach(function(el){ el.classList.remove('error'); });
+
+    var nomePartes = nomeCompleto.split(/\s+/).filter(function(p){ return p.length > 0; });
+    if (nomePartes.length < 2) { nomeEl.classList.add('error'); ok = false; }
+    if (!validarEmail(email)) { emailEl.classList.add('error'); ok = false; }
+
+    if (!ok) {
+      showToast('👆 Preencha nome e e-mail corretamente.');
+      var first = document.querySelector('.field input.error');
+      if (first) first.scrollIntoView({behavior:'smooth', block:'center'});
       return;
     }
 
-    var nomeCompleto=nomeEl.value.trim();
-    var email=emailEl.value.trim();
+    var extra = getBuyerExtraData();
+    if (![11, 14].includes(extra.document.length)) {
+      showToast('Não encontramos CPF/CNPJ do comprador no cadastro. A FlevoPay exige esse dado para gerar o Pix.');
+      console.warn('[FLEVOPAY] Documento do comprador ausente. O checkout não gera CPF fictício.');
+      return;
+    }
+    if (extra.phone.length < 10 || extra.phone.length > 13) {
+      showToast('Não encontramos telefone com DDD no cadastro. A FlevoPay exige esse dado para gerar o Pix.');
+      console.warn('[FLEVOPAY] Telefone do comprador ausente. O checkout não gera telefone fictício.');
+      return;
+    }
 
-    // Cache PIX
-    var saved=sessionStorage.getItem('pix_data_front');
-    if(saved){
-      try{
-        var ps=JSON.parse(saved);
-        if(ps.expires_at&&Date.now()<ps.expires_at){
-          PAYMENT_CODE=ps.payment_code;PIX_CODE=ps.pix_code;
-          openModal(nomeCompleto,email,ps);return;
+    // Reaproveita um PIX pendente somente para o mesmo e-mail e dentro da validade.
+    var saved = sessionStorage.getItem('pix_data_front');
+    if (saved) {
+      try {
+        var ps = JSON.parse(saved);
+        if (ps.expires_at && Date.now() < ps.expires_at &&
+            ps.payment_code && ps.pix_code && ps.customer_email === email) {
+          PAYMENT_CODE = ps.payment_code;
+          PIX_CODE = ps.pix_code;
+          openModal(nomeCompleto, email, ps);
+          return;
         }
-      }catch(e){}
+      } catch(e) {}
       sessionStorage.removeItem('pix_data_front');
     }
 
-    var btn=this,text=btn.querySelector('.btn-text');
-    btn.classList.add('loading');btn.disabled=true;text.textContent='Gerando PIX...';
+    var btn = this;
+    var textEl = btn.querySelector('.btn-text');
+    btn.classList.add('loading');
+    btn.disabled = true;
+    if (textEl) textEl.textContent = 'Gerando PIX...';
 
-    fetch('/api/generate_qr_gateway',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({name:nomeCompleto,email:email,amount:Math.round(taxaParam*100),offer:'modelo +18',description:'Taxa de Confirmacao TikTok',utm:window.location.search.replace(/^\?/,'')})
+    // Mantém os dados já existentes no lead_data; não os sobrescreve apenas com nome/e-mail.
+    var leadFinal = Object.assign({}, extra.localLead, extra.sessionLead, {
+      nome: nomeCompleto,
+      email: email,
+      document: extra.document,
+      phone: extra.phone
+    });
+
+    var payload = {
+      amount: taxaCentavos,
+      description: 'Taxa de Confirmacao TikTok',
+      offer: 'modelo +18',
+      source: 'api_externa',
+      customer: {
+        name: nomeCompleto,
+        email: email,
+        document: extra.document,
+        phone: extra.phone
+      },
+      utm: window.location.search.replace(/^\?/, '')
+    };
+
+    fetch('/api/generate_qr_gateway', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
     })
-    .then(function(r){return r.json();})
-    .then(function(data){
-      btn.classList.remove('loading');btn.disabled=false;text.textContent='Pagar Agora';
-      if(data.error||!data.payment_code){showToast('❌ Erro ao gerar PIX. Tente novamente.');return;}
-      PAYMENT_CODE=data.payment_code;PIX_CODE=data.pix_code||data.pix_copy_paste||'';
-      var leadJson=JSON.stringify({nome:nomeCompleto,email:email});
-      sessionStorage.setItem('lead_data',leadJson);
-      try{localStorage.setItem('lead_data',leadJson);}catch(e){}
-      var expiresAt=Date.now()+(10*60*1000);
-      sessionStorage.setItem('pix_data_front',JSON.stringify({payment_code:PAYMENT_CODE,pix_code:PIX_CODE,expires_at:expiresAt}));
-      openModal(nomeCompleto,email,{expires_at:expiresAt});
+    .then(function(response) {
+      return response.text().then(function(raw) {
+        var data = {};
+        try { data = raw ? JSON.parse(raw) : {}; }
+        catch(e) { throw new Error('O servidor retornou uma resposta inválida.'); }
+        if (!response.ok) {
+          throw new Error(data.error || data.message || ('Erro HTTP ' + response.status));
+        }
+        return data;
+      });
     })
-    .catch(function(){
-      btn.classList.remove('loading');btn.disabled=false;text.textContent='Pagar Agora';
-      showToast('❌ Erro de conexão. Tente novamente.');
+    .then(function(data) {
+      if (!data.success || !(data.transactionId || data.payment_code)) {
+        throw new Error(data.error || 'A FlevoPay não retornou o identificador da cobrança.');
+      }
+
+      PAYMENT_CODE = String(data.transactionId || data.payment_code);
+      PIX_CODE = data.pixCode || data.pix_code || data.qr_code || data.pix_copy_paste || '';
+      if (!PIX_CODE) {
+        throw new Error('A FlevoPay criou a cobrança, mas não retornou o código Pix Copia e Cola.');
+      }
+
+      var expiresAt = data.expires_at ? new Date(String(data.expires_at).replace(' ', 'T')).getTime() : NaN;
+      if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+        expiresAt = Date.now() + (10 * 60 * 1000);
+      }
+
+      try {
+        sessionStorage.setItem('lead_data', JSON.stringify(leadFinal));
+        localStorage.setItem('lead_data', JSON.stringify(leadFinal));
+        sessionStorage.setItem('pix_data_front', JSON.stringify({
+          payment_code: PAYMENT_CODE,
+          pix_code: PIX_CODE,
+          expires_at: expiresAt,
+          customer_email: email
+        }));
+      } catch(storageError) {
+        console.warn('[FLEVOPAY] Não foi possível salvar o cache local.', storageError);
+      }
+
+      openModal(nomeCompleto, email, {expires_at: expiresAt});
+    })
+    .catch(function(error) {
+      console.error('[FLEVOPAY PIX]', error);
+      showToast('❌ ' + (error.message || 'Não foi possível gerar o Pix.'));
+    })
+    .finally(function() {
+      btn.classList.remove('loading');
+      btn.disabled = false;
+      if (textEl) textEl.textContent = 'Pagar Agora';
     });
   });
 
