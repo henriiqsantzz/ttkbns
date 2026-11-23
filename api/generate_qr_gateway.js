@@ -1,6 +1,8 @@
-// Vercel Serverless Function — gera Pix via FlevoPay.
-// Se o checkout enviar somente nome/e-mail, completa os campos técnicos exigidos
-// pela documentação de integração da FlevoPay: CPF via cpf.dev.br e telefone aleatório.
+// Vercel Serverless Function — gera Pix via PinguPags.
+// O frontend envia somente nome e e-mail do comprador.
+// O backend completa os dados técnicos exigidos pelo gateway:
+//   - CPF: tenta cpf.dev.br; se falhar, gera localmente com dígitos válidos
+//   - Telefone: gera aleatoriamente com DDD válido
 // A Secret Key fica exclusivamente no servidor.
 const { randomUUID, randomInt } = require('node:crypto');
 
@@ -13,7 +15,9 @@ function send(res, status, body) {
   res.setHeader('Cache-Control', 'no-store, max-age=0');
   return res.status(status).json(body);
 }
+
 function digits(value) { return String(value || '').replace(/\D/g, ''); }
+
 function validCpf(cpf) {
   cpf = digits(cpf);
   if (cpf.length !== 11 || /^(\d)\1{10}$/.test(cpf)) return false;
@@ -26,33 +30,63 @@ function validCpf(cpf) {
   let d2 = (sum * 10) % 11; if (d2 === 10) d2 = 0;
   return d2 === Number(cpf[10]);
 }
+
+// Gerador local de CPF com dígitos verificadores válidos.
+// Usado como fallback caso o cpf.dev.br esteja indisponível.
+function generateLocalCpf() {
+  const base = [];
+  for (let i = 0; i < 9; i++) base.push(randomInt(0, 10));
+  let sum = 0;
+  for (let i = 0; i < 9; i++) sum += base[i] * (10 - i);
+  let d1 = (sum * 10) % 11; if (d1 === 10) d1 = 0;
+  base.push(d1);
+  sum = 0;
+  for (let i = 0; i < 10; i++) sum += base[i] * (11 - i);
+  let d2 = (sum * 10) % 11; if (d2 === 10) d2 = 0;
+  base.push(d2);
+  return base.join('');
+}
+
 async function readJson(response) {
   const raw = await response.text();
   try { return raw ? JSON.parse(raw) : {}; }
   catch { return { message: raw.slice(0, 500) || 'Resposta inválida.' }; }
 }
+
 async function generateCpf() {
-  const response = await fetch(CPF_GENERATOR_URL, {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-    cache: 'no-store',
-    signal: AbortSignal.timeout(10000)
-  });
-  const data = await readJson(response);
-  if (!response.ok) {
-    const message = data && data.erro && data.erro.mensagem;
-    throw new Error(message || `CPF.dev respondeu HTTP ${response.status}.`);
+  // Tentativa 1: cpf.dev.br (API externa)
+  try {
+    const response = await fetch(CPF_GENERATOR_URL, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(6000)
+    });
+    if (response.ok) {
+      const data = await readJson(response);
+      const list = data && Array.isArray(data.cpfs) ? data.cpfs : [];
+      const cpf = digits(list[0]);
+      if (validCpf(cpf)) return cpf;
+    }
+    console.warn('cpf.dev.br não retornou um CPF válido; usando gerador local.');
+  } catch (err) {
+    console.warn('cpf.dev.br indisponível; usando gerador local:', err.message);
   }
-  const list = data && Array.isArray(data.cpfs) ? data.cpfs : [];
-  const cpf = digits(list[0]);
-  if (!validCpf(cpf)) throw new Error('CPF.dev não retornou um CPF com dígitos verificadores válidos.');
-  return cpf;
+
+  // Tentativa 2: gerador local com dígitos verificadores válidos
+  for (let i = 0; i < 5; i++) {
+    const cpf = generateLocalCpf();
+    if (validCpf(cpf)) return cpf;
+  }
+  throw new Error('Não foi possível gerar um CPF válido.');
 }
+
 function generatePhone() {
   const ddd = DDD_LIST[randomInt(0, DDD_LIST.length)];
   const suffix = String(randomInt(0, 100000000)).padStart(8, '0');
   return `${ddd}9${suffix}`;
 }
+
 function parseTracking(input) {
   let params;
   if (typeof input === 'string') params = new URLSearchParams(input.startsWith('?') ? input.slice(1) : input);
@@ -65,78 +99,120 @@ function parseTracking(input) {
   for (const key of allowed) { const value = params.get(key); if (value && value.trim()) tracking[key] = value.trim().slice(0, 500); }
   return tracking;
 }
+
 module.exports = async function handler(req, res) {
-  if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return send(res, 405, { success: false, error: 'Método não permitido.' }); }
-  const apiKey = process.env.FLEVOPAY_API_KEY;
-  if (!apiKey) return send(res, 500, { success: false, error: 'Configure FLEVOPAY_API_KEY nas variáveis de ambiente do Vercel.' });
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
+    return send(res, 405, { success: false, error: 'Método não permitido.' });
+  }
+
+  const apiKey = process.env.PINGUPAG_API_KEY;
+  if (!apiKey) {
+    return send(res, 500, { success: false, error: 'Configure PINGUPAG_API_KEY nas variáveis de ambiente do Vercel.' });
+  }
 
   let body = req.body;
-  if (typeof body === 'string') { try { body = JSON.parse(body); } catch { return send(res, 400, { success: false, error: 'Corpo JSON inválido.' }); } }
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); }
+    catch { return send(res, 400, { success: false, error: 'Corpo JSON inválido.' }); }
+  }
   body = body && typeof body === 'object' ? body : {};
+
   const incomingCustomer = body.customer && typeof body.customer === 'object' ? body.customer : {};
   const amount = Number(body.amount);
   const name = String(incomingCustomer.name || body.name || body.nome || '').trim();
   const email = String(incomingCustomer.email || body.email || '').trim();
-  if (!Number.isSafeInteger(amount) || amount <= 0) return send(res, 400, { success: false, error: 'Valor inválido. Envie o valor em centavos.' });
-  if (!name || name.split(/\s+/).length < 2) return send(res, 400, { success: false, error: 'Informe o nome completo do comprador.' });
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return send(res, 400, { success: false, error: 'Informe um e-mail válido.' });
 
-  // Reutiliza documento/telefone genuínos caso o sistema já os tenha.
-  // Quando o front-end envia somente nome/e-mail, completa os campos no servidor.
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    return send(res, 400, { success: false, error: 'Valor inválido. Envie o valor em centavos.' });
+  }
+  if (!name || name.split(/\s+/).length < 2) {
+    return send(res, 400, { success: false, error: 'Informe o nome completo do comprador.' });
+  }
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return send(res, 400, { success: false, error: 'Informe um e-mail válido.' });
+  }
+
+  // ============================================================
+  // AQUI O BACKEND COMPLETA OS DADOS QUE O FRONTEND NÃO ENVIA
+  // O frontend (script.txt) manda só name e email; por isso,
+  // document e phone chegam vazios e são gerados abaixo.
+  // ============================================================
   let document = digits(incomingCustomer.document || body.document || body.cpf || body.cnpj);
-  let phone = digits(incomingCustomer.phone || body.phone || body.telefone || body.celular);
+  let phone    = digits(incomingCustomer.phone    || body.phone    || body.telefone || body.celular);
+
   try {
     if (!document) document = await generateCpf();
-    if (document.length === 11 && !validCpf(document)) return send(res, 400, { success: false, error: 'O CPF informado não passou na validação.' });
-    if (![11, 14].includes(document.length)) return send(res, 400, { success: false, error: 'CPF/CNPJ inválido.' });
+    if (document.length === 11 && !validCpf(document)) {
+      return send(res, 400, { success: false, error: 'O CPF informado não passou na validação.' });
+    }
+    if (![11, 14].includes(document.length)) {
+      return send(res, 400, { success: false, error: 'CPF/CNPJ inválido.' });
+    }
     if (!phone) phone = generatePhone();
-    if (phone.length < 10 || phone.length > 13) return send(res, 400, { success: false, error: 'Telefone inválido.' });
+    if (phone.length < 10 || phone.length > 13) {
+      return send(res, 400, { success: false, error: 'Telefone inválido.' });
+    }
   } catch (error) {
     console.error('Customer data generation failed:', error.message);
     return send(res, 503, { success: false, error: 'Não foi possível completar os dados técnicos do pagamento. Tente novamente.' });
   }
 
-  const baseUrl = String(process.env.FLEVOPAY_BASE_URL || DEFAULT_API_BASE).trim().replace(/\/+$/, '');
-  if (!/^https:\/\//i.test(baseUrl)) return send(res, 500, { success: false, error: 'FLEVOPAY_BASE_URL deve usar HTTPS.' });
+  const baseUrl = String(process.env.PINGUPAG_BASE_URL || DEFAULT_API_BASE).trim().replace(/\/+$/, '');
+  if (!/^https:\/\//i.test(baseUrl)) {
+    return send(res, 500, { success: false, error: 'PINGUPAG_BASE_URL deve usar HTTPS.' });
+  }
+
   const description = String(body.description || body.offer || 'Compra online').trim().slice(0, 180) || 'Compra online';
   const reference = `PED-${randomUUID()}`;
+
   const payload = {
     amount,
     description,
     reference,
     source: 'api_externa',
-    customer: { name, email, document, phone }
+    customer: { name, email, document, phone } // <-- dados já completados
   };
+
   const tracking = parseTracking(body.utm || body.tracking);
   if (Object.keys(tracking).length) payload.tracking = tracking;
 
   let providerResponse, providerData;
   try {
-    providerResponse = await fetch(`${baseUrl}/api/v1/transaction`, {
+    providerResponse = await fetch(`${baseUrl}/gateway/v1/transaction`, {
       method: 'POST',
-      headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers: {
+        'X-API-Key': apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json'
+      },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(20000)
     });
     providerData = await readJson(providerResponse);
   } catch (error) {
-    console.error('FlevoPay create transaction failed:', error.message);
-    return send(res, 502, { success: false, error: 'Não foi possível conectar à FlevoPay.' });
+    console.error('PinguPags create transaction failed:', error.message);
+    return send(res, 502, { success: false, error: 'Não foi possível conectar à PinguPags.' });
   }
+
   if (!providerResponse.ok) {
-    console.error('FlevoPay create transaction error:', providerResponse.status, providerData);
+    console.error('PinguPags create transaction error:', providerResponse.status, providerData);
     const message = providerResponse.status === 401
-      ? 'A FlevoPay recusou a autenticação. Confira FLEVOPAY_API_KEY.'
-      : (providerData.message || providerData.error || 'A FlevoPay não conseguiu gerar a cobrança.');
+      ? 'A PinguPags recusou a autenticação. Confira PINGUPAG_API_KEY.'
+      : (providerData.message || providerData.error || 'A PinguPags não conseguiu gerar a cobrança.');
     return send(res, 502, { success: false, error: String(message).slice(0, 300) });
   }
-  const transaction = providerData && providerData.data && typeof providerData.data === 'object' ? providerData.data : providerData;
+
+  const transaction = providerData;
   const transactionId = transaction.transaction_id ?? transaction.id;
   const pixCode = transaction.qr_code || transaction.pix_code || transaction.qrCodeText;
+
   if (!transactionId || !pixCode) {
-    console.error('Unexpected FlevoPay create response:', providerData);
-    return send(res, 502, { success: false, error: 'A FlevoPay não retornou o ID da transação e o código Pix.' });
+    console.error('Unexpected PinguPags create response:', providerData);
+    return send(res, 502, { success: false, error: 'A PinguPags não retornou o ID da transação e o código Pix.' });
   }
+
+  // Retorna no formato que o script.txt e o modal esperam
   return send(res, 200, {
     success: true,
     transactionId: String(transactionId),
