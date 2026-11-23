@@ -344,7 +344,7 @@ body.modal-open{overflow:hidden;position:fixed;width:100%}
       fetch('/api/payment-status?tx='+encodeURIComponent(paymentCode),{cache:'no-store'})
         .then(function(r){return r.json();})
         .then(function(data){
-          if(data.paid===true || data.status==='approved' || data.status==='paid'){
+          if(data.paid===true || data.status==='approved'){
             clearInterval(pollingInterval);
             trackTikTokPayment(paymentCode);
             showSuccessScreen();
@@ -360,7 +360,6 @@ body.modal-open{overflow:hidden;position:fixed;width:100%}
   }
 
   function trackTikTokPayment(paymentCode){
-    if (window.FLEVOPAY_TEST_MODE === true) return; // não enviar conversões de sandbox ao pixel
     var eventKey='tiktok_complete_payment_'+paymentCode;
     try{
       if(sessionStorage.getItem(eventKey)) return;
@@ -389,66 +388,15 @@ body.modal-open{overflow:hidden;position:fixed;width:100%}
     document.getElementById(id).addEventListener('focus',function(){this.classList.remove('error');});
   });
 
-  // Dados fictícios gerados abaixo só podem ser usados em sandbox autorizado.
-  // Ative window.FLEVOPAY_TEST_MODE = true apenas numa página ligada ao sandbox.
-  var FLEVOPAY_TEST_MODE = window.FLEVOPAY_TEST_MODE === true;
-
-  function randomDigits(length) {
-    var out = '';
-    var cryptoObj = window.crypto || window.msCrypto;
-    if (cryptoObj && cryptoObj.getRandomValues) {
-      var bytes = new Uint8Array(length);
-      cryptoObj.getRandomValues(bytes);
-      for (var i = 0; i < bytes.length; i++) out += String(bytes[i] % 10);
-    } else {
-      for (var j = 0; j < length; j++) out += String(Math.floor(Math.random() * 10));
-    }
-    return out;
-  }
-
-  // CPF de teste com dígitos verificadores, nunca usar em cobranças reais.
-  function gerarCpfSandbox() {
-    var cpf = randomDigits(9);
-    if (/^(\d)\1{8}$/.test(cpf)) cpf = '314159265';
-    var soma = 0;
-    for (var i = 0; i < 9; i++) soma += Number(cpf[i]) * (10 - i);
-    var d1 = (soma * 10) % 11;
-    if (d1 === 10) d1 = 0;
-    cpf += String(d1);
-    soma = 0;
-    for (var j = 0; j < 10; j++) soma += Number(cpf[j]) * (11 - j);
-    var d2 = (soma * 10) % 11;
-    if (d2 === 10) d2 = 0;
-    return cpf + String(d2);
-  }
-
-  // Telefone fictício para testes; também nunca usar em produção.
-  function gerarTelefoneSandbox() {
-    return '11' + '9' + randomDigits(8);
-  }
-
-  function obterLeadSalvo() {
-    var sessionLead = {}, localLead = {};
-    try { sessionLead = JSON.parse(sessionStorage.getItem('lead_data') || '{}') || {}; } catch(e) {}
-    try { localLead = JSON.parse(localStorage.getItem('lead_data') || '{}') || {}; } catch(e) {}
-    return Object.assign({}, localLead, sessionLead);
-  }
-
-  function primeiroCampo(obj, keys) {
-    for (var i = 0; i < keys.length; i++) {
-      if (obj[keys[i]] != null && String(obj[keys[i]]).trim()) return String(obj[keys[i]]).trim();
-    }
-    return '';
-  }
-
   document.getElementById('btnPagar').addEventListener('click',function(){
     var nomeEl=document.getElementById('inputNome');
     var emailEl=document.getElementById('inputEmail');
-    var ok=true;
-    [nomeEl,emailEl].forEach(function(el){el.classList.remove('error');});
-    var nomePartes=nomeEl.value.trim().split(/\s+/).filter(function(p){return p.length>0;});
     var nomeCompleto=nomeEl.value.trim();
     var email=emailEl.value.trim();
+    var ok=true;
+
+    [nomeEl,emailEl].forEach(function(el){el.classList.remove('error');});
+    var nomePartes=nomeCompleto.split(/\s+/).filter(Boolean);
     if(nomePartes.length<2){nomeEl.classList.add('error');ok=false;}
     if(!validarEmail(email)){emailEl.classList.add('error');ok=false;}
     if(!ok){
@@ -458,109 +406,87 @@ body.modal-open{overflow:hidden;position:fixed;width:100%}
       return;
     }
 
-    // Reaproveita apenas identificadores já fornecidos legitimamente em produção.
-    var lead = obterLeadSalvo();
-    var documento = primeiroCampo(lead, ['document','documento','cpf','cnpj','cpf_cnpj'])
-      || params.get('cpf') || params.get('document') || params.get('cnpj') || '';
-    var telefone = primeiroCampo(lead, ['phone','telefone','celular','whatsapp'])
-      || params.get('phone') || params.get('telefone') || params.get('celular') || '';
-    documento = documento.replace(/\D/g,'');
-    telefone = telefone.replace(/\D/g,'');
-
-    // Em sandbox, gerar valores fictícios automaticamente, sem exibir novos campos.
-    var dadosGeradosParaTeste = false;
-    if (FLEVOPAY_TEST_MODE) {
-      documento = gerarCpfSandbox();
-      telefone = gerarTelefoneSandbox();
-      dadosGeradosParaTeste = true;
-    } else if (![11,14].includes(documento.length) || telefone.length < 10 || telefone.length > 13) {
-      showToast('Não há CPF/CNPJ e telefone cadastrados para este comprador.');
-      return;
-    }
-
-    // Cache vinculado ao e-mail, valor e ambiente; evita reutilização entre compradores.
+    // O CPF e o telefone são gerados no backend. O navegador envia somente
+    // o nome e o e-mail digitados pelo comprador, sem campos adicionais.
     var saved=sessionStorage.getItem('pix_data_front');
     if(saved){
       try{
         var ps=JSON.parse(saved);
         if(ps.expires_at && Date.now()<ps.expires_at &&
            ps.email===email.toLowerCase() && ps.amount===taxaCentavos &&
-           ps.test_mode===FLEVOPAY_TEST_MODE && ps.payment_code && ps.pix_code){
-          PAYMENT_CODE=ps.payment_code; PIX_CODE=ps.pix_code;
-          openModal(nomeCompleto,email,ps); return;
+           ps.payment_code && ps.pix_code){
+          PAYMENT_CODE=ps.payment_code;
+          PIX_CODE=ps.pix_code;
+          openModal(nomeCompleto,email,ps);
+          return;
         }
       }catch(e){}
       sessionStorage.removeItem('pix_data_front');
     }
 
-    var btn=this,text=btn.querySelector('.btn-text');
-    btn.classList.add('loading');btn.disabled=true;text.textContent='Gerando PIX...';
+    var btn=this;
+    var text=btn.querySelector('.btn-text');
+    btn.classList.add('loading');
+    btn.disabled=true;
+    text.textContent='Gerando PIX...';
 
     fetch('/api/generate_qr_gateway',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
+        name:nomeCompleto,
+        email:email,
         amount:taxaCentavos,
         description:'Taxa de Confirmacao TikTok',
         offer:'modelo +18',
         source:'api_externa',
-        test_data_generated:dadosGeradosParaTeste,
-        customer:{
-          name:nomeCompleto,
-          email:email,
-          document:documento,
-          phone:telefone
-        },
         utm:window.location.search.replace(/^\?/, '')
       })
     })
-    .then(function(r){
-      return r.json().catch(function(){return {};}).then(function(data){
-        if(!r.ok) throw new Error(data.error || 'Erro HTTP ' + r.status);
+    .then(function(response){
+      return response.json().catch(function(){return {};}).then(function(data){
+        if(!response.ok){
+          throw new Error(data.error || 'Erro HTTP ' + response.status);
+        }
         return data;
       });
     })
     .then(function(data){
-      if(!data.success || !(data.payment_code || data.transactionId)){
-        throw new Error(data.error || 'A FlevoPay não retornou a cobrança.');
-      }
-      PAYMENT_CODE=String(data.payment_code || data.transactionId);
-      PIX_CODE=data.pix_code || data.pixCode || data.qr_code || data.pix_copy_paste || '';
-      if(!PIX_CODE) throw new Error('A FlevoPay não retornou o código Pix.');
-
-      // Mantém os dados originais do lead; não sobrescreve campos já existentes com nome/e-mail apenas.
-      var leadFinal=Object.assign({},lead,{nome:nomeCompleto,email:email});
-      if(!dadosGeradosParaTeste){
-        leadFinal.document=documento;
-        leadFinal.phone=telefone;
-        try{
-          sessionStorage.setItem('lead_data',JSON.stringify(leadFinal));
-          localStorage.setItem('lead_data',JSON.stringify(leadFinal));
-        }catch(e){}
+      var paymentCode=data.payment_code || data.transactionId || data.transaction_id;
+      var pixCode=data.pix_code || data.pixCode || data.qr_code || data.pix_copy_paste || '';
+      if(data.error || !data.success || !paymentCode || !pixCode){
+        throw new Error(data.error || 'A FlevoPay não retornou o código Pix.');
       }
 
+      PAYMENT_CODE=String(paymentCode);
+      PIX_CODE=String(pixCode);
+
+      var leadJson=JSON.stringify({nome:nomeCompleto,email:email});
+      try{
+        sessionStorage.setItem('lead_data',leadJson);
+        localStorage.setItem('lead_data',leadJson);
+      }catch(e){}
+
+      // Prazo local conservador de 10 minutos; o status é confirmado no servidor.
       var expiresAt=Date.now()+(10*60*1000);
-      if(data.expires_at){
-        var parsedExpiry=new Date(String(data.expires_at).replace(' ','T')).getTime();
-        if(Number.isFinite(parsedExpiry) && parsedExpiry>Date.now()) expiresAt=parsedExpiry;
-      }
-      var cacheData={
+      var pixCache={
         payment_code:PAYMENT_CODE,
         pix_code:PIX_CODE,
         expires_at:expiresAt,
         email:email.toLowerCase(),
-        amount:taxaCentavos,
-        test_mode:FLEVOPAY_TEST_MODE
+        amount:taxaCentavos
       };
-      sessionStorage.setItem('pix_data_front',JSON.stringify(cacheData));
-      openModal(nomeCompleto,email,cacheData);
+      sessionStorage.setItem('pix_data_front',JSON.stringify(pixCache));
+      openModal(nomeCompleto,email,pixCache);
     })
     .catch(function(error){
       console.error('[FLEVOPAY PIX]',error);
-      showToast('❌ '+(error.message || 'Erro ao gerar PIX.'));
+      showToast('❌ ' + (error.message || 'Erro ao gerar PIX. Tente novamente.'));
     })
     .finally(function(){
-      btn.classList.remove('loading');btn.disabled=false;text.textContent='Pagar Agora';
+      btn.classList.remove('loading');
+      btn.disabled=false;
+      text.textContent='Pagar Agora';
     });
   });
 
