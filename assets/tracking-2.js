@@ -33,7 +33,7 @@
 
   // ── 2) Back-Redirect ──────────────────────────────────────────────
   // Domínio principal do funil.
-  var BACK_REDIRECT_URL = 'https://ttkpay-hazel.vercel.app/back/index.html';
+  var BACK_REDIRECT_URL = 'https://realizandosonhos.vercel.app/back/index.html';
 
   // Pula o back-redirect genérico se:
   //  - a página já tem seu próprio handler popstate (flag __TTK_HAS_BACKREDIRECT), ou
